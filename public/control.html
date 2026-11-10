@@ -7,6 +7,7 @@
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #eee; }
   h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 18px 0 8px; color: #ccc; }
   .sub { color: #aaa; font-size: 13px; margin-bottom: 14px; }
   .status { padding: 8px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 14px; background: #222; }
   .status.on { background: #0a3d1a; }
@@ -15,29 +16,46 @@
   button { padding: 10px 16px; font-size: 15px; border: none; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
   button:active { background: #1d4ed8; }
   button.secondary { background: #333; }
+  button.danger { background: #7f1d1d; }
+  button.small { padding: 6px 10px; font-size: 13px; }
   input[type=text] { padding: 10px; font-size: 15px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; flex: 1; min-width: 180px; }
-  #phones { display: flex; flex-wrap: wrap; gap: 6px; }
-  .phone { padding: 6px 12px; border-radius: 16px; background: #222; border: 1px solid #444; font-size: 13px; cursor: pointer; }
-  .phone.sel { background: #0a3d1a; border-color: #22c55e; }
-  .phone small { color: #888; }
+  #phones { display: flex; flex-direction: column; gap: 8px; }
+  .phone { padding: 10px 12px; border-radius: 10px; background: #1d1d1d; border: 1px solid #444; }
+  .phone.sel { border-color: #22c55e; background: #0a2a16; }
+  .phone .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .phone .name { font-size: 15px; font-weight: 600; }
+  .phone .uid { font-size: 12px; color: #888; word-break: break-all; }
+  .phone .uid small { color: #666; }
+  .phone .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .phone.banned { opacity: 0.75; border-color: #7f1d1d; }
+  .dot { color: #22c55e; }
+  .dot.off { color: #ef4444; }
   #shotWrap { position: relative; display: inline-block; max-width: 100%; }
   #shot { max-width: 100%; border: 1px solid #333; border-radius: 8px; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
   #swipeLine { position: absolute; pointer-events: none; display: none; }
   #log { font-size: 12px; color: #aaa; white-space: pre-wrap; margin-top: 12px; max-height: 180px; overflow-y: auto; background: #181818; padding: 8px; border-radius: 8px; }
   .hint { font-size: 12px; color: #888; margin-top: 6px; }
   label { font-size: 13px; color: #aaa; }
+  .saved { font-size: 12px; color: #22c55e; }
 </style>
 </head>
 <body>
 <h1>📱 Sanji Control</h1>
-<div class="sub">Enter a phone's UID to connect to it, then touch its screen to control it — tap, or drag to swipe/scroll. No phones are listed here; only a UID you enter connects. (Master UID shows all phones.)</div>
+<div class="sub">Enter a phone's UID once — the browser remembers it, so you don't have to enter it again. Touch the phone's screen to control it — tap, or drag to swipe/scroll. (Master UID shows the owner panel with all phones.)</div>
 <div class="row">
   <label for="uid">Phone UID:</label>
   <input id="uid" type="text" placeholder="Enter the phone UID shown in the app">
   <button id="btnPick">Select phone</button>
+  <button id="btnLogout" class="secondary">Logout / Forget</button>
 </div>
-<div class="row" id="phones" style="display:none"></div>
+<div class="row"><span id="savedNote" class="saved"></span></div>
 <div id="status" class="status off">Connecting to relay…</div>
+<div id="ownerPanel" style="display:none">
+  <h2>👑 Owner Panel</h2>
+  <div id="phones"></div>
+  <h2>🚫 Banned phones</h2>
+  <div id="bannedList"></div>
+</div>
 <div class="row">
   <button id="btnShot">📸 Screenshot</button>
   <button id="btnHome" class="secondary">🏠 Home</button>
@@ -56,7 +74,7 @@
   <img id="shot" alt="Phone screenshot will appear here — press Screenshot">
   <svg id="swipeLine" width="100%" height="100%"><line id="swipePath" x1="0" y1="0" x2="0" y2="0" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/></svg>
 </div>
-<div class="hint">Touch: tap = tap on phone · drag = swipe/scroll on phone. Works with mouse and with your finger on a touchscreen. Each phone has a permanent UID (shown in the app) — enter it above to connect to that phone. No phone list is shown here.</div>
+<div class="hint">Touch: tap = tap on phone · drag = swipe/scroll on phone. Works with mouse and with your finger on a touchscreen. Each phone has a permanent UID (shown in the app) — enter it once and this browser remembers it.</div>
 <div id="log"></div>
 <script>
 (function () {
@@ -68,61 +86,174 @@
   var swipePath = document.getElementById('swipePath');
   var uidInput = document.getElementById('uid');
   var phonesEl = document.getElementById('phones');
+  var bannedEl = document.getElementById('bannedList');
+  var ownerPanelEl = document.getElementById('ownerPanel');
+  var savedNoteEl = document.getElementById('savedNote');
   var MASTER_UID = 'Sanjipro@123';
+  var LS_KEY = 'sanji-control-login';
   var masterMode = false;
   var ws = null, cmdId = 0, selectedUid = '', onlineUids = {};
+  var bannedUids = {};
+  var aliasByUid = {};   // realUid -> custom UID
+  var uidByAlias = {};   // custom UID -> realUid
   var screenW = 0, screenH = 0;
   function log(s) { logEl.textContent = (new Date().toLocaleTimeString()) + '  ' + s + '\n' + logEl.textContent; }
+  function displayName(uid) {
+    var a = aliasByUid[uid];
+    var base = onlineUids[uid] || uid;
+    return a ? a + ' (' + base + ')' : base;
+  }
+  function resolveUid(uidOrAlias) { return uidByAlias[uidOrAlias] || uidOrAlias; }
+  function saveLogin() {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({uid: selectedUid, master: masterMode}));
+      savedNoteEl.textContent = masterMode ? 'Owner login saved in this browser.' : (selectedUid ? 'Phone UID saved in this browser — no need to enter it again.' : '');
+    } catch (e) {}
+  }
+  function loadLogin() {
+    try {
+      var raw = localStorage.getItem(LS_KEY);
+      if (!raw) return;
+      var j = JSON.parse(raw);
+      if (j && j.master) { masterMode = true; selectedUid = ''; return; }
+      if (j && j.uid) { selectedUid = j.uid; uidInput.value = j.uid; }
+    } catch (e) {}
+  }
   function setStatus() {
     if (!ws || ws.readyState !== WebSocket.OPEN) { statusEl.className = 'status off'; statusEl.textContent = 'Relay: disconnected — retrying…'; return; }
-    if (masterMode) { statusEl.className = 'status on'; statusEl.textContent = '● Master mode — all phones listed below, tap one to control it'; return; }
+    if (masterMode) { statusEl.className = 'status on'; statusEl.textContent = '● Owner panel — all phones listed below, tap one to control it'; return; }
     if (!selectedUid) { statusEl.className = 'status off'; statusEl.textContent = '○ No phone selected — enter a UID above'; return; }
     var on = !!onlineUids[selectedUid];
     statusEl.className = 'status ' + (on ? 'on' : 'off');
-    statusEl.textContent = on ? '● Phone ' + selectedUid + ' ON — connected, ready' : '○ Phone ' + selectedUid + ' is OFF (open the app and turn it ON)';
+    statusEl.textContent = on ? '● Phone ' + displayName(selectedUid) + ' ON — connected, ready' : '○ Phone ' + selectedUid + ' is OFF (open the app and turn it ON)';
   }
   function renderPhones() {
-    if (!masterMode) { phonesEl.style.display = 'none'; phonesEl.innerHTML = ''; return; }
-    phonesEl.style.display = 'flex';
+    if (!masterMode) { ownerPanelEl.style.display = 'none'; phonesEl.innerHTML = ''; bannedEl.innerHTML = ''; return; }
+    ownerPanelEl.style.display = 'block';
     phonesEl.innerHTML = '';
-    Object.keys(onlineUids).forEach(function (uid) {
-      var b = document.createElement('button');
-      b.className = 'phone' + (uid === selectedUid ? ' sel' : '');
-      var label = onlineUids[uid] || uid;
-      if (label !== uid) label += ' · ' + uid.slice(0, 8);
-      b.textContent = label + ' ';
-      var s = document.createElement('small'); s.textContent = '● online'; b.appendChild(s);
-      b.onclick = function () { selectPhone(uid); };
-      phonesEl.appendChild(b);
-    });
-    if (!Object.keys(onlineUids).length) {
-      var d = document.createElement('span'); d.style.color = '#888'; d.style.fontSize = '13px';
+    var uids = Object.keys(onlineUids);
+    if (!uids.length) {
+      var d = document.createElement('div'); d.style.color = '#888'; d.style.fontSize = '13px';
       d.textContent = 'No phones online right now.'; phonesEl.appendChild(d);
     }
+    uids.forEach(function (uid) {
+      var card = document.createElement('div');
+      card.className = 'phone' + (uid === selectedUid ? ' sel' : '') + (bannedUids[uid] ? ' banned' : '');
+      var top = document.createElement('div'); top.className = 'top';
+      var name = document.createElement('span'); name.className = 'name';
+      var alias = aliasByUid[uid];
+      name.textContent = (alias || onlineUids[uid] || uid) + ' ';
+      var dot = document.createElement('span'); dot.className = 'dot'; dot.textContent = '● online';
+      name.appendChild(dot); top.appendChild(name);
+      var uidSpan = document.createElement('span'); uidSpan.className = 'uid';
+      uidSpan.innerHTML = alias ? 'UID: ' + uid + ' <small>(custom UID: ' + alias + ')</small>' : 'UID: ' + uid;
+      top.appendChild(uidSpan);
+      card.appendChild(top);
+      var actions = document.createElement('div'); actions.className = 'actions';
+      var bSel = document.createElement('button'); bSel.className = 'small'; bSel.textContent = uid === selectedUid ? '✓ Selected' : 'Control';
+      bSel.onclick = function () { selectPhone(uid); };
+      actions.appendChild(bSel);
+      var bUid = document.createElement('button'); bUid.className = 'small secondary'; bUid.textContent = 'Change UID';
+      bUid.onclick = function () { changeUid(uid); };
+      actions.appendChild(bUid);
+      var bBan = document.createElement('button'); bBan.className = 'small danger'; bBan.textContent = 'Ban';
+      bBan.onclick = function () { banPhone(uid); };
+      actions.appendChild(bBan);
+      var bCopy = document.createElement('button'); bCopy.className = 'small secondary'; bCopy.textContent = 'Copy UID';
+      bCopy.onclick = function () { copyText(uid); };
+      actions.appendChild(bCopy);
+      card.appendChild(actions);
+      phonesEl.appendChild(card);
+    });
+    // Banned section
+    bannedEl.innerHTML = '';
+    var bans = Object.keys(bannedUids);
+    if (!bans.length) {
+      var e = document.createElement('div'); e.style.color = '#888'; e.style.fontSize = '13px';
+      e.textContent = 'No banned phones.'; bannedEl.appendChild(e);
+    }
+    bans.forEach(function (uid) {
+      var card = document.createElement('div'); card.className = 'phone banned';
+      var top = document.createElement('div'); top.className = 'top';
+      var name = document.createElement('span'); name.className = 'name'; name.textContent = uid + ' ';
+      var dot = document.createElement('span'); dot.className = 'dot off'; dot.textContent = '● banned';
+      name.appendChild(dot); top.appendChild(name);
+      card.appendChild(top);
+      var actions = document.createElement('div'); actions.className = 'actions';
+      var bUn = document.createElement('button'); bUn.className = 'small'; bUn.textContent = 'Unban';
+      bUn.onclick = function () { unbanPhone(uid); };
+      actions.appendChild(bUn);
+      card.appendChild(actions);
+      bannedEl.appendChild(card);
+    });
+  }
+  function copyText(t) {
+    try {
+      if (navigator.clipboard) navigator.clipboard.writeText(t).then(function () { log('copied UID'); });
+      else log('copy not supported here');
+    } catch (e) { log('copy failed'); }
   }
   function refreshDevices() {
     if (!masterMode) return;
     fetch('/devices').then(function (r) { return r.json(); }).then(function (j) {
       var next = {};
-      (j.devices || []).forEach(function (d) { next[d.uid] = d.name || d.uid; });
+      (j.devices || []).forEach(function (d) { next[d.uid] = d.name || d.uid; if (d.alias) { aliasByUid[d.uid] = d.alias; uidByAlias[d.alias] = d.uid; } });
       onlineUids = next;
+      bannedUids = {};
+      (j.banned || []).forEach(function (u) { bannedUids[u] = true; });
+      (j.aliases || []).forEach(function (a) { aliasByUid[a.uid] = a.alias; uidByAlias[a.alias] = a.uid; });
       renderPhones(); setStatus();
     }).catch(function () { log('could not fetch /devices'); });
+  }
+  function banPhone(uid) {
+    if (!confirm('Ban phone ' + uid + '? It will be disconnected and cannot reconnect until unbanned.')) return;
+    sendRaw({type: 'ban', uid: uid});
+    log('ban sent for ' + uid);
+  }
+  function unbanPhone(uid) {
+    sendRaw({type: 'unban', uid: uid});
+    log('unban sent for ' + uid);
+  }
+  function changeUid(uid) {
+    var cur = aliasByUid[uid] || '';
+    var next = prompt('Change UID for phone ' + uid + (cur ? ' (current custom UID: ' + cur + ')' : '') + '\nEnter the new custom UID (letters, numbers, dashes). The phone keeps its real UID underneath — the owner panel will use this new UID to control it.', cur);
+    if (next === null) return;
+    next = (next || '').trim();
+    if (!next) { log('UID change cancelled (empty)'); return; }
+    if (next === uid || next === cur) { log('that UID is already in use for this phone'); return; }
+    sendRaw({type: 'set_alias', uid: uid, alias: next});
+    log('UID change sent: ' + uid + ' → ' + next);
+  }
+  function sendRaw(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { log('not connected to relay'); return; }
+    obj.id = 'web' + (++cmdId);
+    ws.send(JSON.stringify(obj));
   }
   function selectPhone(uid) {
     if (uid === MASTER_UID) {
       masterMode = true;
       selectedUid = '';
-      log('master UID — showing all phones');
+      saveLogin();
+      log('master UID — owner panel unlocked');
       renderPhones(); refreshDevices(); setStatus();
+      if (ws && ws.readyState === WebSocket.OPEN) { sendRaw({type: 'list_bans'}); sendRaw({type: 'list_aliases'}); }
       return;
     }
     masterMode = false;
-    phonesEl.style.display = 'none'; phonesEl.innerHTML = '';
+    ownerPanelEl.style.display = 'none'; phonesEl.innerHTML = ''; bannedEl.innerHTML = '';
     selectedUid = uid; uidInput.value = uid;
+    saveLogin();
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'target', uid: uid}));
     setStatus();
-    log('selected phone ' + uid);
+    log('selected phone ' + uid + ' (saved in this browser)');
+  }
+  function logout() {
+    try { localStorage.removeItem(LS_KEY); } catch (e) {}
+    masterMode = false; selectedUid = ''; uidInput.value = '';
+    savedNoteEl.textContent = '';
+    ownerPanelEl.style.display = 'none'; phonesEl.innerHTML = ''; bannedEl.innerHTML = '';
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'target', uid: ''}));
+    setStatus(); log('logged out — saved UID forgotten');
   }
   function connect() {
     var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
@@ -130,6 +261,7 @@
     ws.onopen = function () {
       ws.send(JSON.stringify({type: 'hello', role: 'controller'}));
       if (selectedUid) ws.send(JSON.stringify({type: 'target', uid: selectedUid}));
+      if (masterMode) { refreshDevices(); sendRaw({type: 'list_bans'}); sendRaw({type: 'list_aliases'}); }
       setStatus(); log('connected to relay');
     };
     ws.onclose = function () { setStatus(); log('relay disconnected'); setTimeout(connect, 3000); };
@@ -141,12 +273,18 @@
         if (masterMode) renderPhones();
         setStatus();
       }
-      else if (msg.type === 'device_online') { onlineUids[msg.uid] = msg.uid; if (masterMode) renderPhones(); setStatus(); log('phone ' + msg.uid + ' came ON'); }
+      else if (msg.type === 'device_online') { onlineUids[msg.uid] = msg.uid; if (msg.alias) { aliasByUid[msg.uid] = msg.alias; uidByAlias[msg.alias] = msg.uid; } if (masterMode) renderPhones(); setStatus(); log('phone ' + msg.uid + ' came ON'); }
       else if (msg.type === 'device_offline') { delete onlineUids[msg.uid]; if (masterMode) renderPhones(); setStatus(); log('phone ' + msg.uid + ' went OFF'); }
+      else if (msg.type === 'banned') { bannedUids[msg.uid] = true; delete onlineUids[msg.uid]; if (masterMode) renderPhones(); setStatus(); log('phone ' + msg.uid + ' banned'); }
+      else if (msg.type === 'unbanned') { delete bannedUids[msg.uid]; if (masterMode) renderPhones(); setStatus(); log('phone ' + msg.uid + ' unbanned'); }
+      else if (msg.type === 'bans') { bannedUids = {}; (msg.bans || []).forEach(function (u) { bannedUids[u] = true; }); if (masterMode) renderPhones(); }
+      else if (msg.type === 'aliases') { (msg.aliases || []).forEach(function (a) { aliasByUid[a.uid] = a.alias; uidByAlias[a.alias] = a.uid; }); if (masterMode) renderPhones(); setStatus(); }
+      else if (msg.type === 'alias_set') { aliasByUid[msg.uid] = msg.alias; uidByAlias[msg.alias] = msg.uid; if (masterMode) renderPhones(); setStatus(); log('UID changed: ' + msg.uid + ' is now ' + msg.alias); }
+      else if (msg.type === 'alias_removed') { delete uidByAlias[msg.alias]; delete aliasByUid[msg.uid]; if (masterMode) renderPhones(); setStatus(); }
       else if (msg.type === 'target_ok') { /* selection confirmed */ }
       else if (msg.type === 'result') { log('result ' + msg.id + ': ' + (msg.ok ? 'OK' : 'FAIL') + ' — ' + (msg.info || '')); }
       else if (msg.type === 'screenshot' && msg.data) {
-        if (msg.from && selectedUid && msg.from !== selectedUid) return;
+        if (msg.from && selectedUid && resolveUid(selectedUid) !== msg.from) return;
         if (msg.sw && msg.sh) { screenW = msg.sw; screenH = msg.sh; }
         shotEl.src = 'data:image/jpeg;base64,' + msg.data;
       }
@@ -155,13 +293,6 @@
   function send(cmd) {
     if (!ws || ws.readyState !== WebSocket.OPEN) { log('not connected to relay'); return; }
     if (!selectedUid) { log('select a phone first (enter its UID above)'); return; }
-    // v7 panel fix: do NOT block on the panel's own onlineUids map. That
-    // map is a cache fed by device_online/device_offline events and it can
-    // go stale (a missed event = the panel thinks the phone is OFF while
-    // the relay still has it, so Screenshot silently did nothing). The
-    // RELAY is authoritative: it forwards when the phone is really there
-    // and replies "phone not connected" when it is not — so always send,
-    // and let the relay decide.
     cmd.id = 'web' + (++cmdId);
     cmd.to = selectedUid;
     ws.send(JSON.stringify(cmd));
@@ -228,6 +359,7 @@
     if (!u) { log('enter a phone UID first'); return; }
     selectPhone(u);
   };
+  document.getElementById('btnLogout').onclick = function () { logout(); };
   document.getElementById('btnShot').onclick = function () { send({type: 'cmd', action: 'screenshot'}); };
   document.getElementById('btnHome').onclick = function () { send({type: 'cmd', action: 'home'}); };
   document.getElementById('btnBack').onclick = function () { send({type: 'cmd', action: 'back'}); };
@@ -242,6 +374,11 @@
     if (!t) { log('type some text first'); return; }
     send({type: 'cmd', action: 'type', text: t});
   };
+  // Restore the saved login (UID / owner) before connecting, so the
+  // panel reconnects to the same phone without asking again.
+  loadLogin();
+  if (masterMode) { savedNoteEl.textContent = 'Owner login saved in this browser.'; }
+  else if (selectedUid) { savedNoteEl.textContent = 'Phone UID saved in this browser — no need to enter it again.'; }
   connect();
 })();
 </script>
