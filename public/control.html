@@ -30,14 +30,13 @@
 </head>
 <body>
 <h1>📱 Sanji Control</h1>
-<div class="sub">Pick a phone by its UID, then touch its screen to control it — tap, or drag to swipe/scroll.</div>
+<div class="sub">Enter a phone's UID to connect to it, then touch its screen to control it — tap, or drag to swipe/scroll. No phones are listed here; only a UID you enter connects. (Master UID shows all phones.)</div>
 <div class="row">
   <label for="uid">Phone UID:</label>
   <input id="uid" type="text" placeholder="Enter the phone UID shown in the app">
   <button id="btnPick">Select phone</button>
-  <button id="btnRefresh" class="secondary">↻ Refresh list</button>
 </div>
-<div class="row" id="phones"></div>
+<div class="row" id="phones" style="display:none"></div>
 <div id="status" class="status off">Connecting to relay…</div>
 <div class="row">
   <button id="btnShot">📸 Screenshot</button>
@@ -57,7 +56,7 @@
   <img id="shot" alt="Phone screenshot will appear here — press Screenshot">
   <svg id="swipeLine" width="100%" height="100%"><line id="swipePath" x1="0" y1="0" x2="0" y2="0" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/></svg>
 </div>
-<div class="hint">Touch: tap = tap on phone · drag = swipe/scroll on phone. Works with mouse and with your finger on a touchscreen. Each phone has a permanent UID (shown in the app) — select it above to control that phone.</div>
+<div class="hint">Touch: tap = tap on phone · drag = swipe/scroll on phone. Works with mouse and with your finger on a touchscreen. Each phone has a permanent UID (shown in the app) — enter it above to connect to that phone. No phone list is shown here.</div>
 <div id="log"></div>
 <script>
 (function () {
@@ -69,22 +68,29 @@
   var swipePath = document.getElementById('swipePath');
   var uidInput = document.getElementById('uid');
   var phonesEl = document.getElementById('phones');
+  var MASTER_UID = 'Sanjipro@123';
+  var masterMode = false;
   var ws = null, cmdId = 0, selectedUid = '', onlineUids = {};
   var screenW = 0, screenH = 0;
   function log(s) { logEl.textContent = (new Date().toLocaleTimeString()) + '  ' + s + '\n' + logEl.textContent; }
   function setStatus() {
     if (!ws || ws.readyState !== WebSocket.OPEN) { statusEl.className = 'status off'; statusEl.textContent = 'Relay: disconnected — retrying…'; return; }
-    if (!selectedUid) { statusEl.className = 'status off'; statusEl.textContent = '○ No phone selected — enter a UID above or tap a phone in the list'; return; }
+    if (masterMode) { statusEl.className = 'status on'; statusEl.textContent = '● Master mode — all phones listed below, tap one to control it'; return; }
+    if (!selectedUid) { statusEl.className = 'status off'; statusEl.textContent = '○ No phone selected — enter a UID above'; return; }
     var on = !!onlineUids[selectedUid];
     statusEl.className = 'status ' + (on ? 'on' : 'off');
     statusEl.textContent = on ? '● Phone ' + selectedUid + ' ON — connected, ready' : '○ Phone ' + selectedUid + ' is OFF (open the app and turn it ON)';
   }
   function renderPhones() {
+    if (!masterMode) { phonesEl.style.display = 'none'; phonesEl.innerHTML = ''; return; }
+    phonesEl.style.display = 'flex';
     phonesEl.innerHTML = '';
     Object.keys(onlineUids).forEach(function (uid) {
       var b = document.createElement('button');
       b.className = 'phone' + (uid === selectedUid ? ' sel' : '');
-      b.textContent = (onlineUids[uid] || uid) + ' ';
+      var label = onlineUids[uid] || uid;
+      if (label !== uid) label += ' · ' + uid.slice(0, 8);
+      b.textContent = label + ' ';
       var s = document.createElement('small'); s.textContent = '● online'; b.appendChild(s);
       b.onclick = function () { selectPhone(uid); };
       phonesEl.appendChild(b);
@@ -95,18 +101,27 @@
     }
   }
   function refreshDevices() {
+    if (!masterMode) return;
     fetch('/devices').then(function (r) { return r.json(); }).then(function (j) {
       var next = {};
       (j.devices || []).forEach(function (d) { next[d.uid] = d.name || d.uid; });
       onlineUids = next;
-      if (selectedUid && !onlineUids[selectedUid]) { /* keep selection, it may come back */ }
       renderPhones(); setStatus();
     }).catch(function () { log('could not fetch /devices'); });
   }
   function selectPhone(uid) {
+    if (uid === MASTER_UID) {
+      masterMode = true;
+      selectedUid = '';
+      log('master UID — showing all phones');
+      renderPhones(); refreshDevices(); setStatus();
+      return;
+    }
+    masterMode = false;
+    phonesEl.style.display = 'none'; phonesEl.innerHTML = '';
     selectedUid = uid; uidInput.value = uid;
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'target', uid: uid}));
-    renderPhones(); setStatus();
+    setStatus();
     log('selected phone ' + uid);
   }
   function connect() {
@@ -115,7 +130,7 @@
     ws.onopen = function () {
       ws.send(JSON.stringify({type: 'hello', role: 'controller'}));
       if (selectedUid) ws.send(JSON.stringify({type: 'target', uid: selectedUid}));
-      setStatus(); log('connected to relay'); refreshDevices();
+      setStatus(); log('connected to relay');
     };
     ws.onclose = function () { setStatus(); log('relay disconnected'); setTimeout(connect, 3000); };
     ws.onerror = function () { setStatus(); };
@@ -123,10 +138,11 @@
       var msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
       if (msg.type === 'relay_hello') {
         onlineUids = {}; (msg.devices || []).forEach(function (uid) { onlineUids[uid] = uid; });
-        renderPhones(); setStatus(); refreshDevices();
+        if (masterMode) renderPhones();
+        setStatus();
       }
-      else if (msg.type === 'device_online') { onlineUids[msg.uid] = msg.uid; renderPhones(); setStatus(); log('phone ' + msg.uid + ' came ON'); }
-      else if (msg.type === 'device_offline') { delete onlineUids[msg.uid]; renderPhones(); setStatus(); log('phone ' + msg.uid + ' went OFF'); }
+      else if (msg.type === 'device_online') { onlineUids[msg.uid] = msg.uid; if (masterMode) renderPhones(); setStatus(); log('phone ' + msg.uid + ' came ON'); }
+      else if (msg.type === 'device_offline') { delete onlineUids[msg.uid]; if (masterMode) renderPhones(); setStatus(); log('phone ' + msg.uid + ' went OFF'); }
       else if (msg.type === 'target_ok') { /* selection confirmed */ }
       else if (msg.type === 'result') { log('result ' + msg.id + ': ' + (msg.ok ? 'OK' : 'FAIL') + ' — ' + (msg.info || '')); }
       else if (msg.type === 'screenshot' && msg.data) {
@@ -206,7 +222,6 @@
     if (!u) { log('enter a phone UID first'); return; }
     selectPhone(u);
   };
-  document.getElementById('btnRefresh').onclick = refreshDevices;
   document.getElementById('btnShot').onclick = function () { send({type: 'cmd', action: 'screenshot'}); };
   document.getElementById('btnHome').onclick = function () { send({type: 'cmd', action: 'home'}); };
   document.getElementById('btnBack').onclick = function () { send({type: 'cmd', action: 'back'}); };
