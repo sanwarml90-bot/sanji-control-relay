@@ -16,14 +16,16 @@
   button:active { background: #1d4ed8; }
   button.secondary { background: #333; }
   input[type=text] { padding: 10px; font-size: 15px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; flex: 1; min-width: 180px; }
-  #shot { max-width: 100%; border: 1px solid #333; border-radius: 8px; cursor: crosshair; display: block; margin-top: 8px; }
+  #shotWrap { position: relative; display: inline-block; max-width: 100%; }
+  #shot { max-width: 100%; border: 1px solid #333; border-radius: 8px; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #swipeLine { position: absolute; pointer-events: none; display: none; }
   #log { font-size: 12px; color: #aaa; white-space: pre-wrap; margin-top: 12px; max-height: 180px; overflow-y: auto; background: #181818; padding: 8px; border-radius: 8px; }
   .hint { font-size: 12px; color: #888; margin-top: 6px; }
 </style>
 </head>
 <body>
 <h1>📱 Sanji Control</h1>
-<div class="sub">Phone control panel — connects to the relay as a controller. Tap the screenshot to tap the phone.</div>
+<div class="sub">Touch the phone screen below to control it — tap, or drag to swipe/scroll.</div>
 <div id="status" class="status off">Connecting to relay…</div>
 <div class="row">
   <button id="btnShot">📸 Screenshot</button>
@@ -39,15 +41,22 @@
   <input id="txt" type="text" placeholder="Type text on the phone…">
   <button id="btnType">Type</button>
 </div>
-<img id="shot" alt="Phone screenshot will appear here — press Screenshot">
-<div class="hint">Tip: press Screenshot, then tap on the image to tap that spot on the phone. The phone app must be ON (green status) for commands to work.</div>
+<div id="shotWrap">
+  <img id="shot" alt="Phone screenshot will appear here — press Screenshot">
+  <svg id="swipeLine" width="100%" height="100%"><line id="swipePath" x1="0" y1="0" x2="0" y2="0" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/></svg>
+</div>
+<div class="hint">Touch: tap = tap on phone · drag = swipe/scroll on phone. Works with mouse and with your finger on a touchscreen.</div>
 <div id="log"></div>
 <script>
 (function () {
   var statusEl = document.getElementById('status');
   var logEl = document.getElementById('log');
   var shotEl = document.getElementById('shot');
-  var ws = null, cmdId = 0, deviceOnline = false, shotW = 0, shotH = 0;
+  var shotWrap = document.getElementById('shotWrap');
+  var swipeLine = document.getElementById('swipeLine');
+  var swipePath = document.getElementById('swipePath');
+  var ws = null, cmdId = 0, deviceOnline = false;
+  var screenW = 0, screenH = 0; // real phone screen size in px (from screenshot msg)
   function log(s) { logEl.textContent = (new Date().toLocaleTimeString()) + '  ' + s + '\n' + logEl.textContent; }
   function setStatus() {
     if (!ws || ws.readyState !== WebSocket.OPEN) { statusEl.className = 'status off'; statusEl.textContent = 'Relay: disconnected — retrying…'; return; }
@@ -67,8 +76,8 @@
       else if (msg.type === 'device_offline') { deviceOnline = false; setStatus(); log('phone went OFF'); }
       else if (msg.type === 'result') { log('result ' + msg.id + ': ' + (msg.ok ? 'OK' : 'FAIL') + ' — ' + (msg.info || '')); }
       else if (msg.type === 'screenshot' && msg.data) {
+        if (msg.sw && msg.sh) { screenW = msg.sw; screenH = msg.sh; }
         shotEl.src = 'data:image/jpeg;base64,' + msg.data;
-        log('screenshot received (' + Math.round(msg.data.length / 1024) + ' KB)');
       }
     };
   }
@@ -79,6 +88,64 @@
     ws.send(JSON.stringify(cmd));
     log('sent: ' + cmd.action);
   }
+  // Convert a point on the displayed image to real phone-screen pixels.
+  function toPhone(x, y) {
+    var r = shotEl.getBoundingClientRect();
+    var fx = (x - r.left) / r.width, fy = (y - r.top) / r.height;
+    var w = screenW || shotEl.naturalWidth, h = screenH || shotEl.naturalHeight;
+    return { x: Math.round(fx * w), y: Math.round(fy * h) };
+  }
+  // --- Touch / mouse handling on the screenshot: tap or drag-to-swipe ---
+  var drag = null;
+  function pos(ev) {
+    if (ev.touches && ev.touches.length) return { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+    return { x: ev.clientX, y: ev.clientY };
+  }
+  function onDown(ev) {
+    if (!shotEl.naturalWidth) { log('take a screenshot first'); return; }
+    ev.preventDefault();
+    var p = pos(ev);
+    drag = { sx: p.x, sy: p.y, cx: p.x, cy: p.y, moved: false };
+  }
+  function onMove(ev) {
+    if (!drag) return;
+    ev.preventDefault();
+    var p = pos(ev);
+    drag.cx = p.x; drag.cy = p.y;
+    var dx = p.x - drag.sx, dy = p.y - drag.sy;
+    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+      drag.moved = true;
+      var r = shotWrap.getBoundingClientRect();
+      swipeLine.style.display = 'block';
+      swipeLine.setAttribute('width', r.width); swipeLine.setAttribute('height', r.height);
+      swipePath.setAttribute('x1', drag.sx - r.left); swipePath.setAttribute('y1', drag.sy - r.top);
+      swipePath.setAttribute('x2', p.x - r.left); swipePath.setAttribute('y2', p.y - r.top);
+    }
+  }
+  function onUp(ev) {
+    if (!drag) return;
+    ev.preventDefault();
+    swipeLine.style.display = 'none';
+    var p = pos(ev.changedTouches ? { touches: ev.changedTouches } : ev);
+    var a = toPhone(drag.sx, drag.sy), b = toPhone(p.x, p.y);
+    if (drag.moved) {
+      send({type: 'cmd', action: 'swipe', x1: a.x, y1: a.y, x2: b.x, y2: b.y, durationMs: 300});
+      log('swipe (' + a.x + ',' + a.y + ') → (' + b.x + ',' + b.y + ')');
+    } else {
+      send({type: 'cmd', action: 'tap', x: a.x, y: a.y});
+      log('tap at ' + a.x + ',' + a.y);
+    }
+    drag = null;
+  }
+  shotEl.addEventListener('mousedown', onDown);
+  shotEl.addEventListener('mousemove', onMove);
+  shotEl.addEventListener('mouseup', onUp);
+  shotEl.addEventListener('mouseleave', function () { if (drag) { onUp({clientX: drag.cx, clientY: drag.cy, preventDefault: function(){}}); } });
+  shotEl.addEventListener('touchstart', onDown, {passive: false});
+  shotEl.addEventListener('touchmove', onMove, {passive: false});
+  shotEl.addEventListener('touchend', onUp, {passive: false});
+  shotEl.addEventListener('touchcancel', function () { drag = null; swipeLine.style.display = 'none'; });
+  shotEl.addEventListener('dragstart', function (ev) { ev.preventDefault(); });
   document.getElementById('btnShot').onclick = function () { send({type: 'cmd', action: 'screenshot'}); };
   document.getElementById('btnHome').onclick = function () { send({type: 'cmd', action: 'home'}); };
   document.getElementById('btnBack').onclick = function () { send({type: 'cmd', action: 'back'}); };
@@ -92,14 +159,6 @@
     var t = document.getElementById('txt').value;
     if (!t) { log('type some text first'); return; }
     send({type: 'cmd', action: 'type', text: t});
-  };
-  shotEl.onclick = function (ev) {
-    if (!shotEl.naturalWidth) { log('take a screenshot first'); return; }
-    var r = shotEl.getBoundingClientRect();
-    var x = Math.round((ev.clientX - r.left) / r.width * shotEl.naturalWidth);
-    var y = Math.round((ev.clientY - r.top) / r.height * shotEl.naturalHeight);
-    send({type: 'cmd', action: 'tap', x: x, y: y});
-    log('tap at ' + x + ',' + y);
   };
   connect();
 })();
