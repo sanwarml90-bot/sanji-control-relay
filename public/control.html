@@ -34,6 +34,11 @@
   #shot { max-width: 100%; border: 1px solid #333; border-radius: 8px; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
   #swipeLine { position: absolute; pointer-events: none; display: none; }
   #log { font-size: 12px; color: #aaa; white-space: pre-wrap; margin-top: 12px; max-height: 180px; overflow-y: auto; background: #181818; padding: 8px; border-radius: 8px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 140px; padding: 10px; font-size: 14px; font-family: ui-monospace, monospace; border-radius: 8px; border: 1px solid #444; background: #1a1a1a; color: #eee; resize: vertical; }
+  select { padding: 10px; font-size: 14px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; flex: 1; min-width: 180px; }
+  #scriptLog { font-size: 12px; color: #aaa; white-space: pre-wrap; margin-top: 8px; max-height: 150px; overflow-y: auto; background: #181818; padding: 8px; border-radius: 8px; }
+  #scriptLog .ok { color: #22c55e; }
+  #scriptLog .bad { color: #ef4444; }
   .hint { font-size: 12px; color: #888; margin-top: 6px; }
   label { font-size: 13px; color: #aaa; }
   .saved { font-size: 12px; color: #22c55e; }
@@ -70,6 +75,21 @@
   <input id="txt" type="text" placeholder="Type text on the phone…">
   <button id="btnType">Type</button>
 </div>
+<h2>📜 Scripts — do many steps in one tap</h2>
+<div class="sub">Write one action per line. The relay runs them on the phone in order, waiting for each step, and stops if a step fails. Tap the screenshot to find coordinates — each tap logs its x,y below.</div>
+<div class="row">
+  <select id="scriptPick"></select>
+  <button id="btnScriptLoad" class="secondary small">Load</button>
+  <button id="btnScriptDelete" class="secondary small">Delete</button>
+</div>
+<textarea id="scriptText" spellcheck="false" placeholder="# Example — open Telegram and take a screenshot&#10;open_app org.telegram.messenger&#10;wait 2000&#10;screenshot"></textarea>
+<div class="row">
+  <button id="btnScriptRun">▶ Run script</button>
+  <button id="btnScriptStop" class="secondary">■ Stop</button>
+  <button id="btnScriptSave" class="secondary">💾 Save</button>
+</div>
+<div class="hint">Actions: <b>open_app</b> package · <b>tap</b> x y · <b>swipe</b> x1 y1 x2 y2 [ms] · <b>type</b> text… · <b>back</b> · <b>home</b> · <b>recents</b> · <b>wait</b> ms · <b>screenshot</b> · lines starting with <b>#</b> are comments. Example: find a user — open_app, wait, tap the search icon, type the name, tap the result, type the message, tap send.</div>
+<div id="scriptLog"></div>
 <div id="shotWrap">
   <img id="shot" alt="Phone screenshot will appear here — press Screenshot">
   <svg id="swipeLine" width="100%" height="100%"><line id="swipePath" x1="0" y1="0" x2="0" y2="0" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/></svg>
@@ -283,6 +303,12 @@
       else if (msg.type === 'alias_removed') { delete uidByAlias[msg.alias]; delete aliasByUid[msg.uid]; if (masterMode) renderPhones(); setStatus(); }
       else if (msg.type === 'target_ok') { /* selection confirmed */ }
       else if (msg.type === 'result') { log('result ' + msg.id + ': ' + (msg.ok ? 'OK' : 'FAIL') + ' — ' + (msg.info || '')); }
+      else if (msg.type === 'script_progress') { scriptLog('step ' + (msg.step + 1) + '/' + msg.total + ' ' + msg.action + ': ' + (msg.ok ? 'OK' : 'FAIL') + (msg.info ? ' — ' + msg.info : ''), msg.ok); }
+      else if (msg.type === 'script_done') {
+        if (msg.ok) { scriptLog('✅ script finished — all ' + (msg.total || 0) + ' steps OK', true); }
+        else { scriptLog('⛔ script stopped: ' + (msg.error || 'failed') + (msg.step !== undefined ? ' (at step ' + (msg.step + 1) + '/' + msg.total + ')' : ''), false); }
+        scriptRunning = false; setScriptButtons();
+      }
       else if (msg.type === 'screenshot' && msg.data) {
         if (msg.from && selectedUid && resolveUid(selectedUid) !== msg.from) return;
         if (msg.sw && msg.sh) { screenW = msg.sw; screenH = msg.sh; }
@@ -374,6 +400,89 @@
     if (!t) { log('type some text first'); return; }
     send({type: 'cmd', action: 'type', text: t});
   };
+  // ---- Scripts ----
+  var scriptTextEl = document.getElementById('scriptText');
+  var scriptPickEl = document.getElementById('scriptPick');
+  var scriptLogEl = document.getElementById('scriptLog');
+  var SCRIPT_LS = 'sanji-control-scripts';
+  var scriptRunning = false, scriptRunId = '';
+  var EXAMPLES = {
+    'Example: open Telegram + screenshot': '# Open Telegram, wait, take a screenshot\nopen_app org.telegram.messenger\nwait 2000\nscreenshot',
+    'Example: send a message (fill in the taps)': '# 1) Open Telegram. 2) Tap the chat in the list (find x,y by tapping the screenshot).\n# 3) Tap the Message box, type, tap send (bottom-right of the input row).\nopen_app org.telegram.messenger\nwait 2000\nscreenshot'
+  };
+  function scriptLog(s, ok) {
+    var d = document.createElement('div');
+    if (ok === true) d.className = 'ok';
+    if (ok === false) d.className = 'bad';
+    d.textContent = (new Date().toLocaleTimeString()) + '  ' + s;
+    scriptLogEl.insertBefore(d, scriptLogEl.firstChild);
+  }
+  function loadScripts() {
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(SCRIPT_LS) || '{}') || {}; } catch (e) {}
+    return saved;
+  }
+  function refreshScriptPick() {
+    var saved = loadScripts();
+    scriptPickEl.innerHTML = '';
+    var opt0 = document.createElement('option'); opt0.value = ''; opt0.textContent = '— Saved / example scripts —';
+    scriptPickEl.appendChild(opt0);
+    Object.keys(EXAMPLES).forEach(function (name) {
+      var o = document.createElement('option'); o.value = 'ex:' + name; o.textContent = name; scriptPickEl.appendChild(o);
+    });
+    Object.keys(saved).forEach(function (name) {
+      var o = document.createElement('option'); o.value = 'sv:' + name; o.textContent = '💾 ' + name; scriptPickEl.appendChild(o);
+    });
+  }
+  function setScriptButtons() {
+    document.getElementById('btnScriptRun').disabled = scriptRunning;
+    document.getElementById('btnScriptStop').disabled = !scriptRunning;
+  }
+  document.getElementById('btnScriptLoad').onclick = function () {
+    var v = scriptPickEl.value;
+    if (!v) { scriptLog('pick a script first', false); return; }
+    if (v.indexOf('ex:') === 0) { scriptTextEl.value = EXAMPLES[v.slice(3)] || ''; scriptLog('loaded example'); }
+    else { var saved = loadScripts(); scriptTextEl.value = saved[v.slice(3)] || ''; scriptLog('loaded saved script: ' + v.slice(3)); }
+  };
+  document.getElementById('btnScriptDelete').onclick = function () {
+    var v = scriptPickEl.value;
+    if (v.indexOf('sv:') !== 0) { scriptLog('only saved scripts can be deleted', false); return; }
+    var name = v.slice(3);
+    if (!confirm('Delete saved script "' + name + '"?')) return;
+    var saved = loadScripts(); delete saved[name];
+    try { localStorage.setItem(SCRIPT_LS, JSON.stringify(saved)); } catch (e) {}
+    refreshScriptPick(); scriptLog('deleted script: ' + name);
+  };
+  document.getElementById('btnScriptSave').onclick = function () {
+    var t = scriptTextEl.value.trim();
+    if (!t) { scriptLog('nothing to save — write a script first', false); return; }
+    var name = prompt('Save script as (a short name):');
+    if (name === null) return;
+    name = (name || '').trim();
+    if (!name) { scriptLog('save cancelled (empty name)', false); return; }
+    var saved = loadScripts(); saved[name] = t;
+    try { localStorage.setItem(SCRIPT_LS, JSON.stringify(saved)); } catch (e) { scriptLog('could not save (browser storage blocked)', false); return; }
+    refreshScriptPick(); scriptPickEl.value = 'sv:' + name;
+    scriptLog('saved script: ' + name);
+  };
+  document.getElementById('btnScriptRun').onclick = function () {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { scriptLog('not connected to relay', false); return; }
+    if (!selectedUid) { scriptLog('select a phone first (enter its UID above)', false); return; }
+    var t = scriptTextEl.value.trim();
+    if (!t) { scriptLog('write a script first', false); return; }
+    scriptRunId = 'r' + Date.now().toString(36);
+    scriptRunning = true; setScriptButtons();
+    scriptLogEl.innerHTML = '';
+    scriptLog('▶ running script on ' + selectedUid + '…');
+    ws.send(JSON.stringify({type: 'run_script', id: 'web' + (++cmdId), to: selectedUid, script: t, runId: scriptRunId}));
+  };
+  document.getElementById('btnScriptStop').onclick = function () {
+    if (!scriptRunId) return;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'stop_script', id: 'web' + (++cmdId), runId: scriptRunId}));
+    scriptLog('■ stop requested…');
+  };
+  refreshScriptPick();
+  setScriptButtons();
   // Restore the saved login (UID / owner) before connecting, so the
   // panel reconnects to the same phone without asking again.
   loadLogin();
