@@ -74,8 +74,17 @@ wss.on('connection', (ws) => {
       const c = controllers.get(ws);
       const to = String(msg.to || (c && c.targetUid) || '');
       const dev = devices.get(to);
-      if (dev) safeSend(dev.ws, raw.toString());
-      else safeSend(ws, JSON.stringify({type: 'result', id: msg.id || '', ok: false, info: 'phone not connected: ' + (to || '(no phone selected)')}));
+      // v7 relay fix: a device entry whose socket is no longer OPEN is
+      // STALE (phone's network dropped without a close event — the old
+      // code silently swallowed the send and the panel waited forever
+      // with no feedback, looking like "the app doesn't work"). Drop the
+      // stale entry, tell the controllers the phone is off, and reply so
+      // the panel shows the real state instead of hanging.
+      if (dev && dev.ws.readyState === WebSocket.OPEN) {
+        safeSend(dev.ws, raw.toString());
+      } else {
+        if (dev) { devices.delete(to); notifyControllers({type: 'device_offline', uid: to}); }
+        safeSend(ws, JSON.stringify({type: 'result', id: msg.id || '', ok: false, info: 'phone not connected: ' + (to || '(no phone selected)')}));}
       return;
     }
     if (role === 'device') {
