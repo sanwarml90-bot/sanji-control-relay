@@ -1,8 +1,11 @@
-// Sanji Control relay — forwards JSON messages between the phone (device)
-// and any number of controllers (this agent, the web control panel) over
-// WebSocket. No auth, no storage, no logs of content.
-// One device at a time (last one wins); controllers are a set, and device
-// messages are broadcast to all of them.
+// Sanji Control relay — forwards JSON messages between phones (devices) and
+// controllers over WebSocket. No auth, no storage, no logs of content.
+//
+// Multi-phone: each phone registers with a permanent UID (its Android ID).
+// Devices are kept in a Map keyed by UID. A controller picks a phone by
+// sending {"type":"target","uid":"<uid>"} (or by putting "to":"<uid>" on a
+// command). Device messages carry "from":"<uid>" so a panel can show only
+// the selected phone. /devices lists the connected phones.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -10,7 +13,16 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 8080;
 const CONTROL_PAGE = fs.readFileSync(path.join(__dirname, 'public', 'control.html'), 'utf8');
 const server = http.createServer((req, res) => {
-  if (req.url === '/health') { res.writeHead(200, {'Content-Type': 'application/json'}); res.end(JSON.stringify({ok: true, device: !!device, controllers: controllers.size})); return; }
+  if (req.url === '/health') {
+    res.writeHead(200, {'Content-Type': 'application/json'});
+    res.end(JSON.stringify({ok: true, device: devices.size > 0, devices: [...devices.keys()], deviceCount: devices.size, controllers: controllers.size}));
+    return;
+  }
+  if (req.url === '/devices') {
+    res.writeHead(200, {'Content-Type': 'application/json'});
+    res.end(JSON.stringify({devices: [...devices.entries()].map(([uid, info]) => ({uid, name: info.name || uid}))}));
+    return;
+  }
   if (req.url === '/' || req.url === '/control' || req.url === '/control.html') {
     res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'});
     res.end(CONTROL_PAGE);
@@ -19,26 +31,60 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, {'Content-Type': 'text/plain'}); res.end('sanji-control-relay ok');
 });
 const wss = new WebSocket.Server({ server });
-let device = null;
-const controllers = new Set();
+// uid -> {ws, name}
+const devices = new Map();
+// controllers: ws -> {targetUid}
+const controllers = new Map();
 function safeSend(ws, data) { try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); } catch (e) {} }
-function broadcastControllers(data) { for (const c of controllers) safeSend(c, data); }
+function notifyControllers(msg) {
+  const data = JSON.stringify(msg);
+  for (const [cws, c] of controllers) {
+    if (!msg.uid || !c.targetUid || c.targetUid === msg.uid) safeSend(cws, data);
+  }
+}
 wss.on('connection', (ws) => {
-  let role = null;
+  let role = null, uid = null;
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
     if (msg.type === 'hello' && (msg.role === 'device' || msg.role === 'controller')) {
       role = msg.role;
-      if (role === 'device') { device = ws; broadcastControllers(JSON.stringify({type: 'device_online'})); }
-      else { controllers.add(ws); safeSend(ws, JSON.stringify({type: 'relay_hello', device_online: !!device})); }
+      if (role === 'device') {
+        uid = String(msg.uid || msg.device || 'unknown');
+        devices.set(uid, {ws, name: msg.device || uid});
+        notifyControllers({type: 'device_online', uid});
+      } else {
+        controllers.set(ws, {targetUid: null});
+        safeSend(ws, JSON.stringify({type: 'relay_hello', devices: [...devices.keys()]}));
+      }
       return;
     }
-    // Forward: controller -> device, device -> all controllers.
-    if (role === 'controller') safeSend(device, raw.toString());
-    else if (role === 'device') broadcastControllers(raw.toString());
+    if (role === 'controller' && msg.type === 'target') {
+      const c = controllers.get(ws); if (c) c.targetUid = String(msg.uid || '');
+      safeSend(ws, JSON.stringify({type: 'target_ok', uid: c ? c.targetUid : ''}));
+      return;
+    }
+    if (role === 'controller') {
+      // Forward a command to the chosen phone: msg.to wins, else the
+      // controller's current target.
+      const c = controllers.get(ws);
+      const to = String(msg.to || (c && c.targetUid) || '');
+      const dev = devices.get(to);
+      if (dev) safeSend(dev.ws, raw.toString());
+      else safeSend(ws, JSON.stringify({type: 'result', id: msg.id || '', ok: false, info: 'phone not connected: ' + (to || '(no phone selected)')}));
+      return;
+    }
+    if (role === 'device') {
+      // Relay a device message to controllers watching this phone.
+      msg.from = uid;
+      notifyControllers(msg);
+      return;
+    }
   });
   ws.on('close', () => {
-    if (role === 'device' && device === ws) { device = null; broadcastControllers(JSON.stringify({type: 'device_offline'})); }
+    if (role === 'device' && uid && devices.get(uid) && devices.get(uid).ws === ws) {
+      devices.delete(uid);
+      notifyControllers({type: 'device_offline', uid});
+    }
     if (role === 'controller') controllers.delete(ws);
   });
 });
