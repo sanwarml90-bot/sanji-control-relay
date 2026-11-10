@@ -30,7 +30,7 @@ const server = http.createServer((req, res) => {
   }
   res.writeHead(200, {'Content-Type': 'text/plain'}); res.end('sanji-control-relay ok');
 });
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ server, maxPayload: 50 * 1024 * 1024 });
 // uid -> {ws, name}
 const devices = new Map();
 // controllers: ws -> {targetUid}
@@ -44,6 +44,11 @@ function notifyControllers(msg) {
 }
 wss.on('connection', (ws) => {
   let role = null, uid = null;
+  // A bad or oversized message must never kill the relay: swallow the
+  // socket error (the socket closes) instead of crashing the process.
+  // (This was the crash: RangeError 'Max payload size exceeded',
+  // WS_ERR_UNSUPPORTED_MESSAGE_LENGTH, unhandled 'error' -> Node.js exit.)
+  ws.on('error', () => { try { ws.close(); } catch (e) {} });
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
     if (msg.type === 'hello' && (msg.role === 'device' || msg.role === 'controller')) {
@@ -88,4 +93,6 @@ wss.on('connection', (ws) => {
     if (role === 'controller') controllers.delete(ws);
   });
 });
+wss.on('error', (e) => console.error('ws server error:', e && e.message));
+server.on('error', (e) => console.error('http server error:', e && e.message));
 server.listen(PORT, () => console.log('relay listening on ' + PORT));
