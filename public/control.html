@@ -155,7 +155,13 @@
   function send(cmd) {
     if (!ws || ws.readyState !== WebSocket.OPEN) { log('not connected to relay'); return; }
     if (!selectedUid) { log('select a phone first (enter its UID above)'); return; }
-    if (!onlineUids[selectedUid]) { log('phone ' + selectedUid + ' is OFF — turn the app ON first'); return; }
+    // v7 panel fix: do NOT block on the panel's own onlineUids map. That
+    // map is a cache fed by device_online/device_offline events and it can
+    // go stale (a missed event = the panel thinks the phone is OFF while
+    // the relay still has it, so Screenshot silently did nothing). The
+    // RELAY is authoritative: it forwards when the phone is really there
+    // and replies "phone not connected" when it is not — so always send,
+    // and let the relay decide.
     cmd.id = 'web' + (++cmdId);
     cmd.to = selectedUid;
     ws.send(JSON.stringify(cmd));
