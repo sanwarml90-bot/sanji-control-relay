@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sanji Control — Phone Control Panel</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #eee; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #aaa; font-size: 13px; margin-bottom: 14px; }
+  .status { padding: 8px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 14px; background: #222; }
+  .status.on { background: #0a3d1a; }
+  .status.off { background: #4d1a1a; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  button { padding: 10px 16px; font-size: 15px; border: none; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+  button:active { background: #1d4ed8; }
+  button.secondary { background: #333; }
+  input[type=text] { padding: 10px; font-size: 15px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; flex: 1; min-width: 180px; }
+  #shot { max-width: 100%; border: 1px solid #333; border-radius: 8px; cursor: crosshair; display: block; margin-top: 8px; }
+  #log { font-size: 12px; color: #aaa; white-space: pre-wrap; margin-top: 12px; max-height: 180px; overflow-y: auto; background: #181818; padding: 8px; border-radius: 8px; }
+  .hint { font-size: 12px; color: #888; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>📱 Sanji Control</h1>
+<div class="sub">Phone control panel — connects to the relay as a controller. Tap the screenshot to tap the phone.</div>
+<div id="status" class="status off">Connecting to relay…</div>
+<div class="row">
+  <button id="btnShot">📸 Screenshot</button>
+  <button id="btnHome" class="secondary">🏠 Home</button>
+  <button id="btnBack" class="secondary">⬅ Back</button>
+  <button id="btnRecents" class="secondary">▦ Recents</button>
+</div>
+<div class="row">
+  <input id="pkg" type="text" placeholder="App package, e.g. com.android.settings">
+  <button id="btnOpen">Open app</button>
+</div>
+<div class="row">
+  <input id="txt" type="text" placeholder="Type text on the phone…">
+  <button id="btnType">Type</button>
+</div>
+<img id="shot" alt="Phone screenshot will appear here — press Screenshot">
+<div class="hint">Tip: press Screenshot, then tap on the image to tap that spot on the phone. The phone app must be ON (green status) for commands to work.</div>
+<div id="log"></div>
+<script>
+(function () {
+  var statusEl = document.getElementById('status');
+  var logEl = document.getElementById('log');
+  var shotEl = document.getElementById('shot');
+  var ws = null, cmdId = 0, deviceOnline = false, shotW = 0, shotH = 0;
+  function log(s) { logEl.textContent = (new Date().toLocaleTimeString()) + '  ' + s + '\n' + logEl.textContent; }
+  function setStatus() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { statusEl.className = 'status off'; statusEl.textContent = 'Relay: disconnected — retrying…'; return; }
+    statusEl.className = 'status ' + (deviceOnline ? 'on' : 'off');
+    statusEl.textContent = deviceOnline ? '● Phone ON — connected, ready' : '○ Relay connected, but phone is OFF (open the app and turn it ON)';
+  }
+  function connect() {
+    var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+    ws = new WebSocket(url);
+    ws.onopen = function () { ws.send(JSON.stringify({type: 'hello', role: 'controller'})); setStatus(); log('connected to relay'); };
+    ws.onclose = function () { setStatus(); log('relay disconnected'); setTimeout(connect, 3000); };
+    ws.onerror = function () { setStatus(); };
+    ws.onmessage = function (ev) {
+      var msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'relay_hello') { deviceOnline = !!msg.device_online; setStatus(); }
+      else if (msg.type === 'device_online') { deviceOnline = true; setStatus(); log('phone came ON'); }
+      else if (msg.type === 'device_offline') { deviceOnline = false; setStatus(); log('phone went OFF'); }
+      else if (msg.type === 'result') { log('result ' + msg.id + ': ' + (msg.ok ? 'OK' : 'FAIL') + ' — ' + (msg.info || '')); }
+      else if (msg.type === 'screenshot' && msg.data) {
+        shotEl.src = 'data:image/jpeg;base64,' + msg.data;
+        log('screenshot received (' + Math.round(msg.data.length / 1024) + ' KB)');
+      }
+    };
+  }
+  function send(cmd) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { log('not connected to relay'); return; }
+    if (!deviceOnline) { log('phone is OFF — turn the app ON first'); return; }
+    cmd.id = 'web' + (++cmdId);
+    ws.send(JSON.stringify(cmd));
+    log('sent: ' + cmd.action);
+  }
+  document.getElementById('btnShot').onclick = function () { send({type: 'cmd', action: 'screenshot'}); };
+  document.getElementById('btnHome').onclick = function () { send({type: 'cmd', action: 'home'}); };
+  document.getElementById('btnBack').onclick = function () { send({type: 'cmd', action: 'back'}); };
+  document.getElementById('btnRecents').onclick = function () { send({type: 'cmd', action: 'recents'}); };
+  document.getElementById('btnOpen').onclick = function () {
+    var p = document.getElementById('pkg').value.trim();
+    if (!p) { log('enter an app package first'); return; }
+    send({type: 'cmd', action: 'open_app', package: p});
+  };
+  document.getElementById('btnType').onclick = function () {
+    var t = document.getElementById('txt').value;
+    if (!t) { log('type some text first'); return; }
+    send({type: 'cmd', action: 'type', text: t});
+  };
+  shotEl.onclick = function (ev) {
+    if (!shotEl.naturalWidth) { log('take a screenshot first'); return; }
+    var r = shotEl.getBoundingClientRect();
+    var x = Math.round((ev.clientX - r.left) / r.width * shotEl.naturalWidth);
+    var y = Math.round((ev.clientY - r.top) / r.height * shotEl.naturalHeight);
+    send({type: 'cmd', action: 'tap', x: x, y: y});
+    log('tap at ' + x + ',' + y);
+  };
+  connect();
+})();
+</script>
+</body>
+</html>
